@@ -1,3 +1,6 @@
-Flask==3.0.3
-Pillow==10.4.0
-requests==2.32.3
+Flask
+Pillow
+requests
+rembg
+onnxruntime
+numpy
