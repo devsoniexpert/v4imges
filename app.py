@@ -4,6 +4,7 @@ import requests
 from io import BytesIO
 
 app = Flask(__name__)
+session = new_session("u2netp")
 
 def colors_match(c1, c2, threshold):
     # Threshold 1 = exact match. Threshold 10 = loose match.
@@ -32,7 +33,7 @@ def process_image():
         if nobg:
             try:
                 from rembg import remove
-                img = remove(img)
+                img = remove(img, session=session)
             except ImportError:
                 return jsonify({"success": False, "error": "Please run: pip install rembg"})
         
