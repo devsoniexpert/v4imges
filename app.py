@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from PIL import Image
 import requests
 from io import BytesIO
-
+from rembg import remove, new_session
 app = Flask(__name__)
 session = new_session("u2netp")
 
