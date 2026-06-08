@@ -1,16 +1,32 @@
+import os
+# CRITICAL: Force the AI model to use minimum threads to survive on 0.1 vCPU
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
 from flask import Flask, request, jsonify
 from PIL import Image
 import requests
 from io import BytesIO
-from rembg import remove, new_session
+import gc
+
 app = Flask(__name__)
-session = new_session("u2netp")
+
+# Lazy-load session to avoid startup crashes on Render
+bg_session = None
+
+def get_bg_session():
+    global bg_session
+    if bg_session is None:
+        from rembg import new_session
+        # u2netp is the perfect balance for 512MB RAM
+        bg_session = new_session("u2netp")
+    return bg_session
 
 def colors_match(c1, c2, threshold):
-    # Threshold 1 = exact match. Threshold 10 = loose match.
     if threshold == 1:
         return c1 == c2
-    max_diff = (threshold - 1) * 12 # Increases tolerance based on slider
+    max_diff = (threshold - 1) * 12 
     return abs(c1[0]-c2[0]) + abs(c1[1]-c2[1]) + abs(c1[2]-c2[2]) <= max_diff
 
 @app.route('/process', methods=['GET'])
@@ -29,20 +45,24 @@ def process_image():
         response.raise_for_status()
         img = Image.open(BytesIO(response.content)).convert('RGBA')
         
-        # 1. Background Removal
-        if nobg:
-            try:
-                from rembg import remove
-                img = remove(img, session=session)
-            except ImportError:
-                return jsonify({"success": False, "error": "Please run: pip install rembg"})
-        
-        # 2. Hard scaling limit
+        # --- MEMORY SAVER FIX ---
+        # Resize BEFORE ML processing! Feeding large images to rembg kills the server.
         max_base_width = 150
         if img.width > max_base_width:
             ratio = max_base_width / float(img.width)
             new_height = int(float(img.height) * float(ratio))
             img = img.resize((max_base_width, new_height), Image.Resampling.LANCZOS)
+        
+        # 2. Real AI Background Removal (Now working on a tiny, RAM-friendly image!)
+        if nobg:
+            try:
+                from rembg import remove
+                session = get_bg_session()
+                img = remove(img, session=session)
+                # Force memory cleanup immediately after ML processing
+                gc.collect() 
+            except ImportError:
+                return jsonify({"success": False, "error": "rembg not installed."})
         
         # 3. User Resolution Scaling
         if res_step > 1:
@@ -62,13 +82,11 @@ def process_image():
                     if visited[y][x]: continue
                     r, g, b, a = img.getpixel((x, y))
                     
-                    # Skip fully transparent pixels or pure white (if bg removal is off)
                     if a < 10 or (r > 245 and g > 245 and b > 245 and not nobg):
                         continue
                     
                     base_color = (r, g, b)
                     
-                    # Expand horizontally (X)
                     w = 0
                     while x + w < width and not visited[y][x+w]:
                         nr, ng, nb, na = img.getpixel((x+w, y))
@@ -76,7 +94,6 @@ def process_image():
                             break
                         w += 1
                     
-                    # Expand vertically (Y) based on the established width
                     h = 0
                     can_expand_down = True
                     while y + h < height and can_expand_down:
@@ -93,12 +110,10 @@ def process_image():
                     
                     if h == 0: h = 1
                     
-                    # Mark rectangle as visited
                     for dy in range(h):
                         for dx in range(w):
                             visited[y+dy][x+dx] = True
                     
-                    # Calculate center coordinates for Roblox CFrame
                     center_x = x + (w - 1) / 2.0
                     center_y = (height - 1) - (y + (h - 1) / 2.0)
                     
@@ -108,7 +123,6 @@ def process_image():
                         "c": [base_color[0]/255.0, base_color[1]/255.0, base_color[2]/255.0]
                     })
         else:
-            # Traditional 1x1 Rendering
             for y in range(height):
                 for x in range(width):
                     r, g, b, a = img.getpixel((x, y))
@@ -118,7 +132,11 @@ def process_image():
                         "w": 1, "h": 1,
                         "c": [r/255.0, g/255.0, b/255.0]
                     })
-                
+        
+        # Clean up variables before returning
+        del img
+        gc.collect()
+
         return jsonify({
             "success": True, 
             "width": width, 
@@ -131,4 +149,5 @@ def process_image():
         return jsonify({"success": False, "error": str(e)})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
+    # Do not run via this block on Render, see instructions below
+    app.run(host='0.0.0.0', port=10000)
